@@ -18,6 +18,7 @@ import java.io.File
 interface DownloadListener {
     fun progress(percent: Float, headline: String, detail: String)
     fun status(text: String)
+    fun log(line: String)
 }
 
 data class DownloadResult(val savedCount: Int, val hadErrors: Boolean, val cancelled: Boolean, val error: String?)
@@ -193,7 +194,7 @@ class Engine(private val ctx: Context) {
             r.addOption("--write-subs")
             if (subs.auto) r.addOption("--write-auto-subs")
             r.addOption("--sub-langs", if (subs.lang == "all") "all,-live_chat" else subs.lang)
-            r.addOption("--convert-subs", "srt")
+            if (subs.mode != "embed" || preset.isAudio) r.addOption("--convert-subs", "srt")
             if (!preset.isAudio && (subs.mode == "embed" || subs.mode == "both")) {
                 r.addOption("--embed-subs")
                 if (subs.mode == "both") r.addOption("-k")
@@ -227,10 +228,28 @@ class Engine(private val ctx: Context) {
         val pct = Regex("\\[download\\]\\s+([\\d.]+)%")
         val itemRe = Regex("Downloading item (\\d+) of (\\d+)")
         var lastEmit = 0L
+        var downloadedOnce = false
+        val logLines = mutableListOf<String>()
 
         var error: String? = null
+        val lastOutput = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
+        listener.log("Command: yt-dlp " + req.buildCommand().joinToString(" "))
+        val watchdog = Thread {
+            try {
+                while (true) {
+                    Thread.sleep(10_000)
+                    val secs = (System.currentTimeMillis() - lastOutput.get()) / 1000
+                    if (secs >= 10) listener.log("(no output from yt-dlp for ${secs}s - working or stuck)")
+                }
+            } catch (_: InterruptedException) { }
+        }.also { it.isDaemon = true; it.start() }
         try {
-            YoutubeDL.getInstance().execute(req, PROCESS_ID) { _, _, line ->
+            YoutubeDL.getInstance().execute(req, PROCESS_ID, true) { _, _, line ->
+                lastOutput.set(System.currentTimeMillis())
+                if (line.isNotBlank()) {
+                    synchronized(logLines) { logLines += line; if (logLines.size > 300) logLines.removeAt(0) }
+                    listener.log(line)
+                }
                 when {
                     itemRe.containsMatchIn(line) -> {
                         val m = itemRe.find(line)!!
@@ -249,6 +268,7 @@ class Engine(private val ctx: Context) {
                         lastDest = f
                         title = File(f).nameWithoutExtension.replace(Regex("\\.f\\d+$"), "")
                     }
+                    !downloadedOnce -> {}
                     line.startsWith("[Merger]") -> listener.status("Merging video and audio…")
                     line.startsWith("[ExtractAudio]") -> listener.status("Converting audio…")
                     line.startsWith("[EmbedSubtitle]") || line.startsWith("[Metadata]") ||
@@ -257,6 +277,7 @@ class Engine(private val ctx: Context) {
                 val m = pct.find(line)
                 if (m != null) {
                     val frac = (m.groupValues[1].toFloatOrNull() ?: 0f) / 100f
+                    if (frac >= 1f) downloadedOnce = true
                     val item = ((minOf(streamIdx, nStreams - 1)) + frac) / nStreams
                     val t = total
                     val overall = if (isPlaylist && t != null && t > 0 && ord > 0)
@@ -272,8 +293,13 @@ class Engine(private val ctx: Context) {
                 }
             }
         } catch (e: Throwable) {
-            if (!cancelRequested) error = cleanError(e)
+            if (!cancelRequested) {
+                val errLine = synchronized(logLines) { logLines.lastOrNull { it.contains("ERROR") } }
+                error = if (errLine != null) cleanError(IllegalStateException(errLine)) else cleanError(e)
+            }
         }
+
+        watchdog.interrupt()
 
         if (cancelRequested) {
             tmp.deleteRecursively()
