@@ -12,6 +12,9 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import android.net.Uri
+import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Foreground service whose only job is to keep the app process alive (and show a progress
@@ -29,12 +32,51 @@ class DownloadService : Service() {
         } else {
             startForeground(NOTIF_ID, n)
         }
+        val url = intent?.getStringExtra(EXTRA_URL)
+        if (url != null) {
+            val idx = intent.getIntExtra(EXTRA_PRESET, 2).coerceIn(0, PRESETS.size - 1)
+            val app = applicationContext
+            Thread {
+                try { runDirect(app, url, idx) } finally { stop(app) }
+            }.start()
+        }
         return START_NOT_STICKY
+    }
+
+    /** Download started from the share pop-up (the app UI may not even be open). */
+    private fun runDirect(ctx: Context, url: String, idx: Int) {
+        val res = try {
+            Engine.ensureInit(ctx)
+            val prefs = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            val cookies = File(ctx.filesDir, "cookies.txt").takeIf { it.exists() }?.absolutePath
+            val tree = prefs.getString("save_uri", null)?.let { Uri.parse(it) }
+            var lastN = 0L
+            Engine(ctx, "md-share-${System.currentTimeMillis()}").download(
+                url, PRESETS[idx], false, null, null, cookies, tree,
+                object : DownloadListener {
+                    override fun progress(percent: Float, headline: String, detail: String) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastN > 1000) { lastN = now; update(ctx, headline, percent.toInt()) }
+                    }
+                    override fun status(text: String) = update(ctx, text, -1)
+                },
+            )
+        } catch (e: Throwable) {
+            DownloadResult(0, false, false, cleanError(e))
+        }
+        when {
+            res.cancelled -> {}
+            res.savedCount > 0 -> finished(ctx, "Done \u2014 ${res.savedCount} file(s) saved")
+            else -> finished(ctx, "Download failed: ${(res.error ?: "unknown error").take(150)}")
+        }
     }
 
     companion object {
         private const val CHANNEL = "downloads"
         private const val NOTIF_ID = 42
+        private const val EXTRA_URL = "url"
+        private const val EXTRA_PRESET = "preset"
+        private val active = AtomicInteger(0)
 
         private fun ensureChannel(ctx: Context) {
             if (Build.VERSION.SDK_INT >= 26) {
@@ -64,7 +106,16 @@ class DownloadService : Service() {
         }
 
         fun start(ctx: Context) {
+            active.incrementAndGet()
             ContextCompat.startForegroundService(ctx, Intent(ctx, DownloadService::class.java))
+        }
+
+        fun startDirect(ctx: Context, url: String, presetIndex: Int) {
+            active.incrementAndGet()
+            ContextCompat.startForegroundService(
+                ctx,
+                Intent(ctx, DownloadService::class.java).putExtra(EXTRA_URL, url).putExtra(EXTRA_PRESET, presetIndex),
+            )
         }
 
         fun update(ctx: Context, text: String, percent: Int) {
@@ -73,8 +124,12 @@ class DownloadService : Service() {
             }
         }
 
+        /** Stops the service only when no download is using it any more. */
         fun stop(ctx: Context) {
-            ctx.stopService(Intent(ctx, DownloadService::class.java))
+            if (active.decrementAndGet() <= 0) {
+                active.set(0)
+                ctx.stopService(Intent(ctx, DownloadService::class.java))
+            }
         }
 
         /** One-off "finished" notification that stays after the service is gone. */

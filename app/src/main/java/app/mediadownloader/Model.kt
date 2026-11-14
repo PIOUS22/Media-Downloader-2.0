@@ -26,7 +26,10 @@ data class Analysis(
     val thumb: String?,
     val platform: String,
     val platformColor: Long,          // 0xFFRRGGBB
+    val formats: List<FmtInfo> = emptyList(),
 )
+
+data class FmtInfo(val height: Int?, val hasVideo: Boolean, val hasAudio: Boolean, val ext: String, val size: Long?)
 
 data class Preset(
     val label: String,
@@ -172,4 +175,31 @@ fun cleanError(e: Throwable): String {
         msg += "\n\nTip: import a cookies.txt file (exported from a browser where you are signed in) and try again."
     }
     return msg
+}
+
+/** (bytes, isExact). Null when the site does not tell us sizes. */
+fun estimateSize(a: Analysis, p: Preset): Pair<Long, Boolean>? {
+    val dur = a.duration ?: 0L
+    val audioOnly = a.formats.filter { it.hasAudio && !it.hasVideo && it.size != null }
+    if (p.isAudio) {
+        if (p.audio == "mp3") {
+            val kbps = p.quality?.removeSuffix("K")?.toIntOrNull() ?: 192
+            return if (dur > 0) (dur * kbps * 125L) to false else null
+        }
+        val best = audioOnly.filter { it.ext == "m4a" }.maxByOrNull { it.size!! } ?: audioOnly.maxByOrNull { it.size!! }
+        return best?.size?.let { it to true }
+    }
+    val h = p.height ?: Int.MAX_VALUE
+    val vids = a.formats.filter { it.hasVideo && (it.height ?: 0) <= h && it.size != null }
+    if (vids.isEmpty()) return null
+    val maxH = vids.maxOf { it.height ?: 0 }
+    val top = vids.filter { (it.height ?: 0) == maxH }
+    val v = top.firstOrNull { it.ext == "mp4" } ?: top.first()
+    val audio = if (v.hasAudio) 0L else ((audioOnly.firstOrNull { it.ext == "m4a" } ?: audioOnly.firstOrNull())?.size ?: 0L)
+    return (v.size!! + audio) to true
+}
+
+fun fmtSize(bytes: Long): String {
+    val mb = bytes / 1048576.0
+    return if (mb >= 1024) "%.1f GB".format(mb / 1024) else if (mb >= 1) "%.1f MB".format(mb) else "%.0f KB".format(bytes / 1024.0)
 }

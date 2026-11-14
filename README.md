@@ -5,7 +5,7 @@ playlist videos / whole playlist, choose MP4 quality or MP3/M4A, optional subtit
 Powered by yt-dlp + ffmpeg (bundled via the `youtubedl-android` library), UI in Kotlin + Jetpack Compose.
 
 Files are saved to **Downloads/MediaDownloader** by default; use **Save to -> Browse** to pick any folder (playlists get their own sub-folder).
-You can also use **Share -> Media Downloader** from the YouTube app or a browser.
+Use **Share -> Media Downloader** in the YouTube app or a browser: a download pop-up (Music / Video options with sizes) slides up over that app, and the download runs in the background. "More formats" opens the full app (playlists, subtitles, all qualities).
 
 Differences from the desktop app
 - "Browser cookies" does not exist on Android -> import a `cookies.txt` file instead (for sign-in / age-restricted videos).

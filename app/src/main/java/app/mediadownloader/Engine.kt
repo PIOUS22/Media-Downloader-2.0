@@ -30,20 +30,37 @@ private fun JSONArray.objects(): List<JSONObject> =
     (0 until length()).mapNotNull { optJSONObject(it) }
 
 /** Thin wrapper around yt-dlp (youtubedl-android) that mirrors the desktop app's logic. */
-class Engine(private val ctx: Context) {
+class Engine(private val ctx: Context, private val processId: String = PROCESS_ID) {
 
     companion object {
         const val PROCESS_ID = "md-download"
         const val SAVE_FOLDER = "MediaDownloader"
+
+        private var inited = false
+
+        /** Safe to call from the app and from the share popup; runs only once per process. */
+        @Synchronized
+        fun ensureInit(ctx: Context) {
+            if (inited) return
+            YoutubeDL.getInstance().init(ctx.applicationContext)
+            FFmpeg.getInstance().init(ctx.applicationContext)
+            inited = true
+        }
+
+        /** Updates yt-dlp at most every 12 hours. */
+        @Synchronized
+        fun updateIfStale(ctx: Context) {
+            val prefs = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            if (System.currentTimeMillis() - prefs.getLong("last_update", 0L) < 12 * 3600 * 1000L) return
+            val r = Engine(ctx).updateYtdlp()
+            if (!r.startsWith("update failed")) prefs.edit().putLong("last_update", System.currentTimeMillis()).apply()
+        }
     }
 
     @Volatile
     private var cancelRequested = false
 
-    fun init() {
-        YoutubeDL.getInstance().init(ctx)
-        FFmpeg.getInstance().init(ctx)
-    }
+    fun init() = ensureInit(ctx)
 
     // ---------------------------------------------------------------- analyse
 
@@ -134,6 +151,21 @@ class Engine(private val ctx: Context) {
         var thumb = thumbOf(info)
         if (thumb == null) thumb = info.optJSONArray("entries")?.objects()?.firstNotNullOfOrNull { thumbOf(it) }
 
+        val fmts = info.optJSONArray("formats")?.objects()?.map { f ->
+            val v = f.str("vcodec")?.let { it != "none" } ?: false
+            val au = f.str("acodec")?.let { it != "none" } ?: false
+            val size = when {
+                !f.isNull("filesize") -> f.optLong("filesize")
+                !f.isNull("filesize_approx") -> f.optLong("filesize_approx")
+                else -> 0L
+            }
+            FmtInfo(
+                height = if (f.isNull("height")) null else f.optInt("height"),
+                hasVideo = v, hasAudio = au, ext = f.str("ext") ?: "",
+                size = size.takeIf { it > 0 },
+            )
+        } ?: emptyList()
+
         return Analysis(
             url = url,
             isYoutube = yt,
@@ -148,6 +180,7 @@ class Engine(private val ctx: Context) {
             thumb = thumb,
             platform = platform,
             platformColor = color,
+            formats = fmts,
         )
     }
 
@@ -227,7 +260,7 @@ class Engine(private val ctx: Context) {
 
     fun cancel() {
         cancelRequested = true
-        YoutubeDL.getInstance().destroyProcessById(PROCESS_ID)
+        YoutubeDL.getInstance().destroyProcessById(processId)
     }
 
     fun download(
@@ -280,7 +313,7 @@ class Engine(private val ctx: Context) {
                 } catch (_: InterruptedException) { }
             }.also { it.isDaemon = true; it.start() }
             try {
-                YoutubeDL.getInstance().execute(req, PROCESS_ID, true) { _, _, line ->
+                YoutubeDL.getInstance().execute(req, processId, true) { _, _, line ->
                     lastOutput.set(System.currentTimeMillis())
                     if (line.isNotBlank()) {
                         synchronized(logLines) { logLines += line; if (logLines.size > 300) logLines.removeAt(0) }
@@ -288,7 +321,7 @@ class Engine(private val ctx: Context) {
                     }
                     if (canRetry && !forbidden && line.contains("HTTP Error 403")) {
                         forbidden = true   // stop this attempt now instead of failing all playlist items
-                        Thread { YoutubeDL.getInstance().destroyProcessById(PROCESS_ID) }.start()
+                        Thread { YoutubeDL.getInstance().destroyProcessById(processId) }.start()
                     }
                     when {
                         itemRe.containsMatchIn(line) -> {

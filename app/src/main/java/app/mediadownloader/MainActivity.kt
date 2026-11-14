@@ -99,7 +99,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun AppTheme(mode: String, content: @Composable () -> Unit) {
+internal fun AppTheme(mode: String, content: @Composable () -> Unit) {
     val dark = when (mode) {
         "dark" -> true
         "light" -> false
